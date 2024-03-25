@@ -1,5 +1,5 @@
 use std::marker::PhantomData;
-use std::mem::swap;
+use std::mem::take;
 
 struct Uninitialized;
 struct Suspended;
@@ -29,21 +29,20 @@ impl PrimesCoroutine<Suspended>{
         self.primes.push(self.current);
         while self.current < u64::MAX{
             self.current += 1;
-            println!("testing {}",self.current);
             let mut found : bool = true;
             for prime in self.primes.iter(){
                 if prime * prime > self.current{
-                    println!("early interruption for square rule {}",prime);
+                    // early interruption for square rule
                     break;
                 }
                 if self.current % prime == 0 {
-                    println!("early interruption for division with {}",prime);
+                    // early interruption for division
                     found = false;
                     break;
                 }
             }
             if found {
-                println!("found {}",self.current);
+                // this is a prime number
                 return Ok(
                     (self.current
                     ,self)
@@ -97,11 +96,18 @@ struct Prime{
     coroutine : CoroutineStatus
 }
 
+impl Prime{
+    fn new() -> Prime{
+        Prime{
+            coroutine: Created(PrimesCoroutine::new())
+        }
+    }
+}
+
 impl Iterator for Prime{
     type Item = u64;
     fn next(& mut self) -> Option<Self::Item>{
-        let mut coroutine = & CoroutineStatus::default();
-        swap(& mut coroutine, self.coroutine);
+        let coroutine = take(& mut self.coroutine);
         match coroutine.next(){
             (status, Some(value)) => {
                 self.coroutine = status;
@@ -162,5 +168,20 @@ mod tests {
                 Err(_) => {panic!("closed stream")}
             }
         }
+    }
+
+
+    #[test]
+    fn iter_test(){
+        let mut result : Vec<u64>= Vec::new();
+        let prime = Prime::new();
+        for p in prime.into_iter(){
+            result.push(p);
+            if p > 20{
+                break;
+            }
+        }
+        let expected : Vec<u64> = vec!(2u64,3u64,5u64,7u64,11u64,13u64,17u64,19u64,23u64);
+        assert_eq!(expected, result);
     }
 }

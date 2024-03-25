@@ -1,0 +1,26 @@
+#+ORG2BLOG:
+#+DATE: [2024-03-25 lun 21:48]
+#+OPTIONS: toc:nil num:nil todo:nil pri:nil tags:nil ^:nil
+#+CATEGORY: Org2Blog, WordPress
+#+TAGS: Emacs, Lisp
+#+DESCRIPTION:
+#+TITLE: Prime Time
+
+In this post I will create a prime number iterator to demonstrate how to emulate
+a coroutine in Rust using a 'Typestate' finite state machine.
+
+This exercise will also show how to use ownership to guarantee proper function
+call and how to use ~take~ to consume a value behind a mutable reference.
+
+This is a second digression from the tree posts I started, but will prove useful
+with them.
+
+previous posts were
+- first
+- second
+- third
+
+* What is a coroutine?
+* Finite Typestate Machine
+* Iterator
+* An alternative to take
