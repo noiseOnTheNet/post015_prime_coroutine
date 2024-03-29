@@ -76,10 +76,6 @@ impl PrimesCoroutine{
     }
 }
 
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
-
 enum CoroutineStatus{
     Undefined,
     Created(PrimesCoroutine<Uninitialized>),

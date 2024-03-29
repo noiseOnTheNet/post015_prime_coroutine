@@ -1,16 +1,19 @@
+#+BLOG: noise on the net
+#+POSTID: 376
 #+ORG2BLOG:
 #+DATE: [2024-03-25 lun 21:48]
 #+OPTIONS: toc:nil num:nil todo:nil pri:nil tags:nil ^:nil
-#+CATEGORY: Org2Blog, WordPress
-#+TAGS: Emacs, Lisp
-#+DESCRIPTION:
+#+CATEGORY: Language learning
+#+TAGS: Rust
+#+DESCRIPTION: An introduction to coroutines, typestate machine, phantom types, iterators and ownership issues
 #+TITLE: Prime Time
 
 In this post I will create a prime number iterator to demonstrate how to emulate
 a coroutine in Rust using a 'Typestate' finite state machine.
 
-This exercise will also show how to use ownership to guarantee proper function
-call and how to use ~take~ to consume a value behind a mutable reference.
+This exercise will also show how to use phantom types and ownership to guarantee
+proper function call and how to use ~take~ to consume a value behind a mutable
+reference.
 
 This is a second digression from the tree posts I started, but will prove useful
 with them.
@@ -21,6 +24,245 @@ previous posts were
 - third
 
 * What is a coroutine?
+a [[https://en.wikipedia.org/wiki/Coroutine][coroutine]] is a code unit whose execution can be suspended and resumed multiple
+times. It reminds of low level interrupts, and it is used among other to
+implement cooperative concurrent code.
+
+Many languages implement this functionality, including the possibility to
+receive some value when the coroutine suspend and (in some languages) to send some
+data when it is resumed.
+
+Another interesting usage of coroutines is to write generators, i.e. iterators
+which creates their content.
+
+When I write this post, Rust language support for coroutines is not in the
+stable distribution yet, so I will try to emulate it using a Finite State
+Machine. Possiby a rusty one.
+* A Prime example in Python
+In order to show the algorithm we are using as an example I will write it in
+Python first
+
+#+begin_src python :exports both :results output
+def prime_coroutine():
+    # first we create a list of prime numbers discovered so far
+    primes = []
+    # let's start with 2
+    current = 2
+    # loop forever
+    while True:
+        # check if the current number is prime
+        found = True
+        for prime in primes:
+            # we wish to check all primes which are
+            # smaller than the sqrt(current)
+            if prime * prime > current:
+                break
+            # check primality
+            if current % prime == 0:
+                found = False
+                break
+        if found:
+            primes.append(current)
+            # this does the magic
+            yield current
+        # let's go with the next
+        current += 1
+
+# create the coroutine object
+coroutine = prime_coroutine()
+
+# each call will restart from the latest yield
+print(next(coroutine))
+print(next(coroutine))
+print(next(coroutine))
+#+end_src
+
+#+RESULTS:
+: 2
+: 3
+: 5
+
 * Finite Typestate Machine
+
+Rust has a reserved word for ~yield~ which is not active yet. The Unstable Rust
+Book reports the current [[https://doc.rust-lang.org/beta/unstable-book/language-features/coroutines.html][implementation]] in the nightly based on a [[https://en.wikipedia.org/wiki/Finite-state_machine][finite state
+machine]] .
+
+#+begin_src dot :file images/post015_coroutine_state.png :exports results
+digraph {
+    subgraph {
+        start [label = "start", shape="oval"];
+        suspended [label = "suspended", shape="box"];
+        stop [label = "stop", shape="oval"];
+        start -> suspended [label = "init"]
+        suspended -> suspended [label = "yield"]
+        suspended -> stop [label = "yield end"]
+        start -> stop[label = "init end"]
+    }
+}
+#+end_src
+
+#+RESULTS:
+[[file:images/post015_coroutine_state.png]]
+
+A finite state machine can be represented by a directed graph where each node
+represent a state and each edge a transition.
+
+Usually transitions are used to perform some kind of operation: in our case we'd
+like to return a prime number from 2 upward. Each coroutine call will return the
+next one. Of course this can be easily done with a ~struct~ and a ~trait~ but
+coroutines fit to a more general case.
+
+In our case we want to express the possibility to have our coroutine to
+- arrive in a ~stop~ state where it can't ever exit
+- resume one or multiple time from the ~suspended~ state, performing some
+  operation and re-entering the ~suspended~ state
+- allow to exit from the ~suspended~ state when no more operation can be performed
+- fail its initialization by movig directly to the ~stop~ state
+
+Let's first define a few data types representing our status
+#+begin_src rust
+struct Uninitialized;
+struct Suspended;
+struct Completed;
+#+end_src
+
+these are empty strcuts we will use as type labels.
+
+We need a structure where to store our coroutine status, this changes depending
+on the kind of output we are looking for. in our case we want to emulate the
+prime algorithm in the previous section so we need
+- a vector of prime numbers found so far
+- the number we are checking
+
+#+begin_src rust
+use std::marker::PhantomData;
+
+struct PrimesCoroutine<State = Uninitialized>{
+    primes : Vec<u64>,
+    current : u64,
+    state : std::marker::PhantomData<State>,
+}
+#+end_src
+this structure is parametrized with a type which represents our state: the
+~PhantomData~ field tells the compiler to not use any space for this "label"
+type, but to consider it when evaluating the type of the object
+
+The whole idea is to use the type checker as a [[https://en.wikipedia.org/wiki/Type_theory][theorem prover]] which will
+demonstrate that a well formed program only performs the allowed transitions
+from the current state.
+
+First we implement the transition from ~Uninitialized~ to ~Suspended~. We want
+to express the following ideas
+- this first step can already return either a value and the ~suspended~ state or
+  a failed initialization: this is represented by the ~Result~ enumeration
+- the current status is *consumed* i.e. it is passed to the transition function
+  and cannot be used anymore: this is represented by a signature *not* using a reference
+
+#+begin_src rust
+impl PrimesCoroutine::<Uninitialized>{
+    fn init(self) -> Result<(u64, PrimesCoroutine<Suspended>), PrimesCoroutine<Completed>>{
+        Ok((
+            2,
+        PrimesCoroutine{
+            primes : self.primes,
+            current : 2,
+            state : PhantomData,
+        }
+        ))
+    }
+}
+#+end_src
+
+Then we implement the ~suspended~ state which contains most of our algorithm:
+- we want to avoid to look up for numbers that cannot be stored in our ~u64~ so
+  we iterate until ~u64::MAX~
+
+#+begin_src rust
+impl PrimesCoroutine<Suspended>{
+    fn resume(mut self) -> Result<(u64, PrimesCoroutine<Suspended>), PrimesCoroutine<Completed>>{
+        self.primes.push(self.current);
+        while self.current < u64::MAX{
+            self.current += 1;
+            let mut found : bool = true;
+            for prime in self.primes.iter(){
+                if prime * prime > self.current{
+                    // early interruption for square rule
+                    break;
+                }
+                if self.current % prime == 0 {
+                    // early interruption for division
+                    found = false;
+                    break;
+                }
+            }
+            if found {
+                // this is a prime number
+                return Ok(
+                    (self.current
+                    ,self)
+                )
+            }
+        }
+
+        Err(
+            PrimesCoroutine{
+                primes : self.primes,
+                current : 0,
+                state : PhantomData
+            }
+        )
+    }
+}
+#+end_src
+
+We may wish to have the list of all primes so far: it is possible to add a
+"generic" trait implementation
+
+#+begin_src rust
+impl<T> PrimesCoroutine<T>{
+    fn get_primes(& self) -> & Vec<u64>{
+        &self.primes
+    }
+}
+#+end_src
+
+finally it is convenient to have a starting point for our state object: this can
+be done by creating an associated function
+#+begin_src rust
+impl PrimesCoroutine{
+    fn new() -> PrimesCoroutine<Uninitialized>{
+        PrimesCoroutine{
+            primes : Vec::new(),
+            current : 2,
+            state : PhantomData,
+        }
+    }
+}
+#+end_src
+
+Now we can test our code
+#+begin_src rust
+    #[test]
+    fn it_works() {
+        let primes = PrimesCoroutine::new();
+        if let Ok((_result, primes)) = primes.init(){
+            let result = primes.resume();
+            match result{
+                Ok((value,_)) => {assert_eq!(value,3)}
+                Err(_) => {panic!("closed stream")}
+            }
+        }
+    }
+#+end_src
 * Iterator
+Everybody love [[https://en.wikipedia.org/wiki/Iterator][iterators]].
+
+I first met them when the [[https://en.wikipedia.org/wiki/Standard_Template_Library][C++ Standard Template Libray]] originally designed by
+[[https://en.wikipedia.org/wiki/Standard_Template_Library][Alexander Stepanov]] became part of standard C++, also exposing some features of
+parametric polymorphism and functional programming.
+
+
 * An alternative to take
+
+# images/post015_coroutine_state.png https://noiseonthenet.space/noise/wp-content/uploads/2024/03/post015_coroutine_state.png
