@@ -8,6 +8,9 @@
 #+DESCRIPTION: An introduction to coroutines, typestate machine, phantom types, iterators and ownership issues
 #+TITLE: Prime Time
 
+file:images/by-pils-GiudN8NZhGY-unsplash-reduced.jpg
+Photo by [[https://unsplash.com/@bypils?utm_content=creditCopyText&utm_medium=referral&utm_source=unsplash][By Pils]] on [[https://unsplash.com/photos/a-green-plant-sitting-on-top-of-a-cement-floor-GiudN8NZhGY?utm_content=creditCopyText&utm_medium=referral&utm_source=unsplash][Unsplash]]
+
 In this post I will create a prime number iterator to demonstrate how to emulate
 a coroutine in Rust using a 'Typestate' finite state machine.
 
@@ -19,10 +22,11 @@ This is a second digression from the tree posts I started, but will prove useful
 with them.
 
 previous posts were
-- first
-- second
-- third
+- [[https://noiseonthenet.space/noise/2024/03/growing-a-binary-tree-in-rust/][Growing a (binary)Tree]]
+- [[https://noiseonthenet.space/noise/2024/03/growing-a-sorting-tree/][Growing a (sorting) Tree]]
+- [[https://noiseonthenet.space/noise/2024/03/stacking-bits/][Stacking Bits]]
 
+The source code for this post is here
 * What is a coroutine?
 a [[https://en.wikipedia.org/wiki/Coroutine][coroutine]] is a code unit whose execution can be suspended and resumed multiple
 times. It reminds of low level interrupts, and it is used among other to
@@ -262,7 +266,179 @@ I first met them when the [[https://en.wikipedia.org/wiki/Standard_Template_Libr
 [[https://en.wikipedia.org/wiki/Standard_Template_Library][Alexander Stepanov]] became part of standard C++, also exposing some features of
 parametric polymorphism and functional programming.
 
+The basic idea is to explore a data structure by looping over its contents,
+without the need to know its internal details. Rust defines the [[https://doc.rust-lang.org/std/iter/trait.Iterator.html][Iterator trait]]
+in the standard library. I will now show how to use our coroutine code to
+implement it.
+
+The first problem to address is to create a place to store the current status of
+our Finite State Machine: as each state is represented by a different type we
+need ad enumeration to store them in a single place
+
+#+begin_src rust
+enum CoroutineStatus{
+    Created(PrimesCoroutine<Uninitialized>),
+    Ready(PrimesCoroutine<Suspended>),
+    Closed(PrimesCoroutine<Completed>)
+}
+// this is for convenience
+use CoroutineStatus::*;
+#+end_src
+
+With this enumeration type we can move the coroutine semantic to an higher
+level: define a ~next~ method for the ~Created~ and ~Ready~ states which will
+perform all the required matching, consume the status and *optionally* return a
+status
+
+#+begin_src rust
+impl CoroutineStatus{
+    fn next(self) -> (CoroutineStatus, Option<u64>){
+        match self{
+            Created(coroutine) => {
+                match coroutine.init(){
+                    Ok((result, coroutine)) =>{
+                        ( Ready(coroutine),
+                          Some(result))
+                    },
+                    Err(coroutine) => {
+                        ( Closed(coroutine),
+                        None)
+                    }
+                }
+            }
+,
+            Ready(coroutine) => {
+                match coroutine.resume(){
+                    Ok((result, coroutine)) =>{
+                        ( Ready(coroutine),
+                          Some(result))
+                    },
+                    Err(coroutine) => {
+                        ( Closed(coroutine),
+                        None)
+                    }
+                }
+            },
+            _ => (self, None),
+        }
+    }
+}
+#+end_src
+
+
+Now we can store this value into a structure; values may change in time but
+there will be an object which we will always refer to for storing our state.
+
+#+begin_src rust
+struct Prime{
+    coroutine : CoroutineStatus
+}
+
+impl Prime{
+    fn new() -> Prime{
+        Prime{
+            coroutine: Created(PrimesCoroutine::new())
+        }
+    }
+}
+#+end_src
+
+as usual an associated function can guarantee that a proper initialization is done
+
+Now let's try to implement the Iterator trait for this struct:
+- we have to define the returned type (will be ~u64~)
+- we have to define a ~next~ method which return an ~Option~ enumeration:
+  - when the iterator returns a value we have ~Some(value)~
+  - when the iterator is exhausted it will returnt ~None~
+
+#+begin_src rust
+impl Iterator for Prime{
+    type Item = u64;
+    fn next(& mut self) -> Option<Self::Item>{
+        match self.coroutine.next(){
+            (status, Some(value)) => {
+                self.coroutine = status;
+                Some(value)
+            },
+            (status, None) => {
+                self.coroutine = status;
+                None
+            }
+        }
+    }
+}
+#+end_src
+
+But this don't work!
+
+Why? when we execute ~next~ on our coroutine we are consuming this value (this
+was made by design); but this value is taken from a *mutable reference* thus
+invalidanting the content of the pointed struct.
+
+The solution is to *temporarily replace* the coroutine value with a placeholder
+(which does not invalidate the referenced struct), then calculate the *real*
+next state and finally set it. This can be done with the ~std::mem::take~ function.
+
+~take~ returns the content a the mutable reference and subsitute it with a
+"default" value, thus requiring us to implement the ~Default~ trait of the type
+involved.
+
+As we wish to minimize the memory copied we just add an empty element in our
+enumeration and choose it as the default value
+#+begin_src rust
+enum CoroutineStatus{
+    Undefined,
+    Created(PrimesCoroutine<Uninitialized>),
+    Ready(PrimesCoroutine<Suspended>),
+    Closed(PrimesCoroutine<Completed>)
+}
+use CoroutineStatus::*;
+
+// implementing the Default trait
+impl Default for CoroutineStatus {
+    fn default() -> Self { Undefined }
+}
+#+end_src
+
+Now we can use ~take~ safely
+
+#+begin_src rust
+impl Iterator for Prime{
+    type Item = u64;
+    fn next(& mut self) -> Option<Self::Item>{
+        let coroutine = take(& mut self.coroutine);
+        match coroutine.next(){
+            (status, Some(value)) => {
+                self.coroutine = status;
+                Some(value)
+            },
+            (status, None) => {
+                self.coroutine = status;
+                None
+            }
+        }
+    }
+}
+#+end_src
 
 * An alternative to take
+This has been already a long journey.
 
+But what if we want to avoid using ~take~ ?
+
+When using our Typestate pattern the state is always consumed to avoid its reuse
+when invalid at a later time, so ~take~ is necessary when we want to store this
+state in a struct.
+
+The alternative is to create a simpler Finite State Machine using an enumeration
+for the states and some pattern matching for each transition.
+
+While this works, illegal transitions are detectable only at run time, so we
+need to create an extra ~Error~ state and manage it in our code later. This may
+be inevitable if you can't use the ~std~ crate, which is the case for *embedded*
+code.
+
+More on this point on other posts
 # images/post015_coroutine_state.png https://noiseonthenet.space/noise/wp-content/uploads/2024/03/post015_coroutine_state.png
+
+# images/by-pils-GiudN8NZhGY-unsplash-reduced.jpg https://noiseonthenet.space/noise/wp-content/uploads/2024/03/by-pils-GiudN8NZhGY-unsplash-reduced.jpg
